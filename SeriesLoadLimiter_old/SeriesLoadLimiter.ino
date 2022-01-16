@@ -4,7 +4,6 @@
 
   Revisions:
   v1.0.0 First release
-  v1.1.0 Added half wave switching functionality for phasing + updated operating instructions
 
   Requires the following libraries:
   AdvancedAnalogWrite (version 1.1.0 or later): https://github.com/brycecherry75/AdvancedAnalogWrite
@@ -41,7 +40,7 @@
   < 1 second to reset LCD display if back EMF countermeasures are enabled should back EMF cause the LCD to blank
 
   If back EMF countermeasures are enabled, one press then release and then a second press within 3 seconds - the load is disabled under this condition (it is impractical to constantly reset the LCD and update the display since it takes 500mS plus data transfer time according to the Adafruit PCD8544 library (later versions have a much shorter delay):
-  0-2 seconds to select preset (under diagnostic mode, "OL" will be displayed if the overcurrent comparator senses overcurrent): 3-5 seconds to recall preset, 6-9 seconds to select wave switching type (power on default is full wave), 10 seconds to exit without recalling a preset and restore the previous preset before this mode was entered
+  0-2 seconds to select preset (under diagnostic mode, "OL" will be displayed if the overcurrent comparator senses overcurrent): 3-5 seconds to recall preset, > 5 seconds to exit without recalling a preset and restore the previous preset before this mode was entered
   3-5 seconds to program preset: < 2 seconds to increment digit, 3-5 seconds to change selected digit, > 5 seconds to set current limit and exit
   6-9 seconds to store preset in EEPROM
   10 seconds to assign preset as power on default
@@ -49,8 +48,7 @@
 
   When powering on, hold the pushbutton and from the time the display shows something, release at:
   2-4 seconds for temporary toggle of EMF countermeasures corresponding to value stored in EEPROM
-  5-7 seconds to enter serial programming mode
-  8-9 seconds to toggle zero crossing sense polarity and store it in EEPROM
+  5-9 seconds to enter serial programming mode
   10 seconds to enter diagnositc mode/current calibration mode at maximum current with AC output disabled (subsequent pushbutton operation exits to diagnostic mode where load is always disabled) - hold for 5-9 seconds for current sweep test with load disabled, hold for 10 seconds to enable/disable back EMF countermeasures
   Under diagnostic mode, the wavefrom from the mains should not be present or SINEWAVE ONLY error may result.
 
@@ -70,7 +68,6 @@
   COMP_TEST current_in_mA: Checks switching threshold of overcurrent comparator
   BACK_EMF (ON/OFF/CHECK): Enable/disable/check if enabled back EMF countermeasures
   CURRENT_SWEEP: Sweeps current until overcurrent is sensed
-  POLARITY (NORMAL/INVERTED/CHECK): Set/check polarity of zero crossing sense
   EXIT (DIAGNOSTICS): Exit serial programming mode (cannot be reentered without powering off the unit then powering on again while holding the pushbutton down for 5-9 seconds or answering a serial terminal prompt) - DIAGNOSTICS option exits serial programming mode with diagnostics enabled (load is always disabled until power is removed)
 
 */
@@ -125,7 +122,7 @@
 
 const byte DebounceDelay = 50; // mS
 
-// EEPROM - normally there is no need to store half cycle/full wave switching configuration
+// EEPROM
 #if PWMsteps <= 255
 #define BytesPerPreset 1
 #elif PWMsteps <= 65534
@@ -136,13 +133,6 @@ const byte DebounceDelay = 50; // mS
 #define CurrentPresetBase 0x0000
 #define PresetRecallBase (CurrentPresetBase + (CurrentPresets * BytesPerPreset))
 #define BackEMFcountermeasuresRequiredBase (PresetRecallBase + 1)
-#define WaveformPositivePolarityBase (BackEMFcountermeasuresRequiredBase + 1)
-
-// waveform types
-const byte FULL_WAVE = 0;
-const byte POS_WAVE = 1;
-const byte NEG_WAVE = 2;
-const byte WaveformTypeCount = 3;
 
 // input pins
 const byte ZeroCrossingIRQpin = 2;
@@ -168,8 +158,6 @@ bool DummyZeroCrossingIRQenable = false;
 volatile bool ZeroCrossingDetected = false; // true on zero crossing IRQ
 volatile bool OvercurrentSensed = false; // true on overcurrent IRQ
 volatile byte EnableOutput = LOW; // output is disabled on setup and is HIGH after initialization passes diagnostic tests
-volatile byte WaveformType = FULL_WAVE;
-volatile byte WaveformPositivePolarity; // retrieved from EEPROM on initialization
 
 // LCD definitions
 Adafruit_PCD8544 lcd = Adafruit_PCD8544(LCD_SCLK, LCD_DIN, LCD_DC, LCD_CS, LCD_Reset);
@@ -225,9 +213,6 @@ const byte MessageThousands = 8;
 const byte MessageTenThousands = 9;
 const byte MessageExit = 10;
 const byte MessageSetMA = 11;
-const byte MessageFullWave = 12;
-const byte MessagePosWave = 13;
-const byte MessageNegWave = 14;
 const byte ErrorNone = 0;
 const byte ErrorSinewaveOnly = 1;
 const byte ErrorNoAltCycles = 2;
@@ -241,12 +226,7 @@ const byte FieldSize = 15;
 
 void ZeroCrossingIRQ() {
   ZeroCrossingDetected = true;
-  if (WaveformType == FULL_WAVE || (WaveformType == POS_WAVE && digitalRead(ZeroCrossingIRQpin) == WaveformPositivePolarity) || (WaveformType == NEG_WAVE && digitalRead(ZeroCrossingIRQpin) != WaveformPositivePolarity)) {
-    digitalWrite(OutputEnable, EnableOutput);
-  }
-  else {
-    digitalWrite(OutputEnable, LOW);
-  }
+  digitalWrite(OutputEnable, EnableOutput);
 }
 
 void OvercurrentIRQ() {
@@ -305,15 +285,6 @@ void PrintMessage(byte MessageToPrint, bool KeepMessage) {
       break;
     case MessageSetMA:
       lcd.print(F("SET mA"));
-      break;
-    case MessageFullWave:
-      lcd.print(F("FULL WAVE"));
-      break;
-    case MessagePosWave:
-      lcd.print(F("POS CYCLE"));
-      break;
-    case MessageNegWave:
-      lcd.print(F("NEG CYCLE"));
       break;
   }
   lcd.display();
@@ -479,7 +450,7 @@ void setup() {
   pinMode(Pushbutton, INPUT_PULLUP);
   pinMode(OvercurrentIRQpin, INPUT_PULLUP);
   pinMode(DummyACcycles, OUTPUT);
-  digitalWrite(DummyACcycles, HIGH); // float this pin via diode
+  digitalWrite(DummyACcycles, LOW);
   byte ErrorCode = ErrorNone;
   AdvancedAnalogWrite.init(CurrentLimitPWM, (MaximumCurrent + 1), FastPWM_ICR, INVERTED); // eliminate unwanted pulse if PWM value = 0
   AdvancedAnalogWrite.write(CurrentLimitPWM, (MaximumCurrent + 1), 0); // eliminate unwanted pulse if PWM value = 0
@@ -493,11 +464,6 @@ void setup() {
   if (BackEMFcountermeasuresRequired != true && BackEMFcountermeasuresRequired != false) {
     BackEMFcountermeasuresRequired = false;
     EEPROM.write(BackEMFcountermeasuresRequiredBase, BackEMFcountermeasuresRequired);
-  }
-  WaveformPositivePolarity = EEPROM.read(WaveformPositivePolarityBase);
-  if (WaveformPositivePolarity != HIGH && WaveformPositivePolarity != LOW) {
-    WaveformPositivePolarity = HIGH;
-    EEPROM.write(WaveformPositivePolarityBase, WaveformPositivePolarity);
   }
   byte ActionToTake = TimePushbuttonHeld();
   lcd.setCursor(0, 0);
@@ -589,9 +555,9 @@ void setup() {
       lcd.setCursor(0, 16);
       lcd.print(F("OVERCURRENT"));
       lcd.setCursor(0, 24);
-      lcd.print(F("SWEEP: ADJUST"));
+      lcd.print(F("SWEEP: SENSE"));
       lcd.setCursor(0, 32);
-      lcd.print(F("VR2 - SENSE AT"));
+      lcd.print(F("AT "));
       lcd.display();
       EnableInterrupts();
       while (true) {
@@ -605,8 +571,8 @@ void setup() {
           CurrentLimit = i;
           WriteCurrentLimit(true);
           if (OvercurrentSensed == true) {
-            lcd.fillRect(40, 0, 54, 8, WHITE); // width is long enough for "OUT LIMIT" message
-            lcd.setCursor(40, 0);
+            lcd.fillRect(18, 32, 54, 8, WHITE); // width is long enough for "OUT LIMIT" message
+            lcd.setCursor(18, 32);
             byte ZeroCount = 0;
             if (CurrentLimit < 10) {
               ZeroCount = 4;
@@ -629,98 +595,27 @@ void setup() {
             break;
           }
           else if (OvercurrentSensed == false && CurrentLimit == MaximumCurrent) {
-            lcd.fillRect(40, 0, 54, 8, WHITE); // width is long enought for "OUT LIMIT" message
-            lcd.setCursor(0, 40);
+            lcd.fillRect(18, 32, 54, 8, WHITE); // width is long enought for "OUT LIMIT" message
+            lcd.setCursor(18, 32);
             lcd.print(F("OUT LIMIT"));
             lcd.display();
           }
         }
       }
+      DisableInterrupts();
       lcd.delayTimerless(DebounceDelay);
       while (digitalRead(Pushbutton) == LOW) { // wait for release
       }
       lcd.delayTimerless(DebounceDelay);
-      lcd.fillRect(0, 16, 84, 32, WHITE);
-      lcd.setCursor(0, 16);
-      lcd.print(F("ADJUST VR3 FOR"));
-      lcd.setCursor(0, 24);
-      lcd.print(F("MIMINUM ZERO"));
-      lcd.setCursor(0, 32);
-      lcd.print(F("CROSS VALUE"));
-      lcd.display();
-      SimpleClockGenerator.init(DummyACcycles);
-      SimpleClockGenerator.start(DummyACcycles, MainsFrequency);
-      while (true) {
-        lcd.setCursor(0, 40);
-        lcd.fillRect(0, 40, 84, 8, WHITE);
-        ZeroCrossingDetected = false;
-        while (ZeroCrossingDetected == false && digitalRead(Pushbutton) == HIGH) {
-        }
-        unsigned long StartTime = micros(); // "result" is 0xF0
-        ZeroCrossingDetected = false;
-        while (ZeroCrossingDetected == false && digitalRead(Pushbutton) == HIGH) {
-        }
-        unsigned long HalfTime = micros(); // "result" is 0x10
-        ZeroCrossingDetected = false;
-        while (ZeroCrossingDetected == false && digitalRead(Pushbutton) == HIGH) {
-        }
-        unsigned long StopTime = micros(); // "result" is 0x31
-        if (digitalRead(Pushbutton) == LOW) {
-          lcd.delayTimerless(DebounceDelay);
-          while (digitalRead(Pushbutton) == LOW) { // wait for release
-          }
-          lcd.delayTimerless(DebounceDelay);
-          break;
-        }
-        if (ZeroCrossingDetected == false) {
-          lcd.print(F("NO ZERO CROSS"));
-        }
-        else {
-          StopTime -= HalfTime; // now 0x21
-          HalfTime -= StartTime; // now 0x20
-          unsigned long HalfCycleDifference;
-          if (StopTime >= HalfTime) {
-            HalfCycleDifference = (StopTime - HalfTime); // final result is 0x01
-          }
-          else {
-            HalfCycleDifference = (HalfTime - StopTime);
-          }
-          if (HalfCycleDifference > 99999UL) {
-            lcd.print(F("OVER RANGE"));
-          }
-          else {
-            byte ZerosToPrint = 0;
-            if (HalfCycleDifference < 10) {
-              ZerosToPrint = 4;
-            }
-            else if (HalfCycleDifference < 100) {
-              ZerosToPrint = 3;
-            }
-            else if (HalfCycleDifference < 1000) {
-              ZerosToPrint = 2;
-            }
-            else if (HalfCycleDifference < 10000) {
-              ZerosToPrint = 1;
-            }
-            if (ZerosToPrint > 0) {
-              for (int i = 0; i < ZerosToPrint; i++) {
-                lcd.print(F("0"));
-              }
-            }
-            lcd.print(HalfCycleDifference);
-          }
-        }
-        lcd.display();
-        lcd.delayTimerless(250);
-      }
     }
     lcd.setCursor(0, 0);
     lcd.clearDisplay();
     lcd.display();
-    DisableInterrupts();
     DummyZeroCrossingIRQenable = true;
+    SimpleClockGenerator.init(DummyACcycles);
+    SimpleClockGenerator.start(DummyACcycles, MainsFrequency);
   }
-  else if (ActionToTake >= 5 && ActionToTake <= 7) {
+  else if (ActionToTake >= 5 && ActionToTake <= 9) {
     lcd.print(F("SERIAL PROGRAM"));
     lcd.setCursor(0, 8);
     lcd.print(F("MODE ENTERED"));
@@ -898,33 +793,6 @@ void setup() {
             }
             DisableInterrupts();
           }
-          else if (FieldOps.compareString(commandSize, FieldSize, command, "POLARITY", 0, 0x20, 0x0D, false) == true) {
-            byte PolarityToWrite;
-            bool PolarityWriteRequired = true;
-            if (FieldOps.compareString(commandSize, FieldSize, command, "NORMAL", 1, 0x20, 0x0D, false) == true) {
-              WaveformPositivePolarity = HIGH;
-            }
-            else if (FieldOps.compareString(commandSize, FieldSize, command, "INVERTED", 1, 0x20, 0x0D, false) == true) {
-              WaveformPositivePolarity = LOW;
-            }
-            else if (FieldOps.compareString(commandSize, FieldSize, command, "CHECK", 1, 0x20, 0x0D, false) == true) {
-              PolarityWriteRequired = false;
-              Serial.print(F("Polarity is "));
-              if (WaveformPositivePolarity == HIGH) {
-                Serial.println(F("normal"));
-              }
-              else {
-                Serial.println(F("inverted"));
-              }
-            }
-            else {
-              ValidField = false;
-              PolarityWriteRequired = false;
-            }
-            if (PolarityWriteRequired == true) {
-              EEPROM.write(WaveformPositivePolarityBase, WaveformPositivePolarity);
-            }
-          }
           else if (FieldOps.compareString(commandSize, FieldSize, command, "EXIT", 0, 0x20, 0x0D, false) == true) {
             if (FieldOps.compareString(commandSize, FieldSize, command, "DIAGNOSTICS", 1, 0x20, 0x0D, false) == true) {
               Serial.println(F("Diagnostic mode enabled"));
@@ -949,27 +817,6 @@ void setup() {
       }
     }
     Serial.end();
-    lcd.setCursor(0, 0);
-    lcd.clearDisplay();
-    lcd.display();
-  }
-  else if (ActionToTake >= 8 && ActionToTake <= 9) {
-    lcd.setCursor(0, 0);
-    lcd.print(F("ZERO CROSS POL"));
-    lcd.setCursor(0, 8);
-    lcd.print(F("IS NOW SET TO"));
-    lcd.setCursor(0, 16);
-    if (WaveformPositivePolarity == HIGH) {
-      WaveformPositivePolarity = LOW;
-      lcd.print(F("INVERTED"));
-    }
-    else {
-      WaveformPositivePolarity = HIGH;
-      lcd.print(F("NORMAL"));
-    }
-    EEPROM.write(WaveformPositivePolarityBase, WaveformPositivePolarity);
-    lcd.display();
-    lcd.delayTimerless(5000);
     lcd.setCursor(0, 0);
     lcd.clearDisplay();
     lcd.display();
@@ -1027,10 +874,10 @@ void setup() {
       ZeroCrossingDetected = false;
       StartTime = micros();
       WaitForZeroCrossingOrTimeout();
-      StopTime = micros();
       if (ZeroCrossingDetected == false) {
         BothEdgesDetected = false;
       }
+      StopTime = micros();
       detachInterrupt(digitalPinToInterrupt(ZeroCrossingIRQpin));
       StopTime -= StartTime; // deals with micros() overflow
       ZeroCrossingTime = StopTime;
@@ -1186,23 +1033,7 @@ void loop() {
             WhatToDo = 11;
             break;
           }
-          else if (WhatToDo > 5 && WhatToDo <= 9) { // select waveform type
-            WaveformType++;
-            if (WaveformType >= WaveformTypeCount) {
-              WaveformType = 0;
-            }
-            if (WaveformType == FULL_WAVE) {
-              PrintMessage(MessageFullWave, false);
-            }
-            else if (WaveformType == POS_WAVE) {
-              PrintMessage(MessagePosWave, false);
-            }
-            else if (WaveformType == NEG_WAVE) {
-              PrintMessage(MessageNegWave, false);
-            }
-            RecalledPreset--; // do not increment
-          }
-          else if (WhatToDo >= 10) { // exit
+          else if (WhatToDo > 5) { // exit
             PrintMessage(MessageExit, false);
             RecalledPreset = OldPreset;
             CurrentLimit = OldPWMvalue;
